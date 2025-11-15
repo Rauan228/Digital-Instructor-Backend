@@ -26,10 +26,15 @@ def _get_cors_origins() -> List[str]:
     origins_env = os.getenv("CORS_ORIGINS", "http://localhost:5173")
     return [o.strip() for o in origins_env.split(",") if o.strip()]
 
+def _get_cors_origin_regex() -> str | None:
+    # Позволяет разрешить домены вида *.vercel.app без явного перечисления
+    return os.getenv("CORS_ORIGIN_REGEX")
+
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_get_cors_origins(),
+    allow_origin_regex=_get_cors_origin_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
