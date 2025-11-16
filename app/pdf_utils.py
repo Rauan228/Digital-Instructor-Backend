@@ -4,8 +4,8 @@ import cv2
 import numpy as np
 
 try:
-    import fitz  # PyMuPDF
-except ImportError:  # подсказка, если не установлено
+    import fitz
+except ImportError:
     fitz = None
 
 
@@ -22,22 +22,14 @@ def pdf_bytes_to_images(
     dpi: int = 300,
     as_jpeg: bool = True,
 ) -> List[np.ndarray]:
-    """
-    Конвертировать PDF-байты в список изображений (BGR, для OpenCV).
-
-    По умолчанию рендерим страницы как JPEG (качество 90) и без альфы,
-    чтобы привести формат к тренировочному домену и уменьшить артефакты.
-    """
     if fitz is None:
         raise RuntimeError("PyMuPDF (pymupdf) is not installed. Please add 'pymupdf' to requirements.")
 
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     images: List[np.ndarray] = []
     for page in doc:
-        # Без альфы, чтобы избежать прозрачностей поверх объектов
         pix = page.get_pixmap(dpi=dpi, alpha=False)
         if as_jpeg:
-            # PyMuPDF tobytes("jpeg") не принимает качество в текущей версии
             img_bytes = pix.tobytes("jpeg")
         else:
             img_bytes = pix.tobytes("png")
