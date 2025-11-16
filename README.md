@@ -1,8 +1,17 @@
 # Digital Inspector – Backend
 
-FastAPI service that powers the ARMETA Digital Inspector demo. The API accepts
-PDF/images, runs three YOLOv8 models (stamps, QR codes, signatures) and returns
-structured detections together with annotated previews.
+FastAPI service that powers the ARMETA Digital Inspector. It accepts PDFs and images, runs object detection (stamps, signatures, authors, signauth, QR codes) via Ultralytics YOLO or Roboflow Hosted Inference, and returns per-page results. Optionally provides annotated previews and writes convenient batch JSONs for downstream processing.
+
+---
+
+## Tech Stack
+
+- Python `3.10`
+- FastAPI + Uvicorn
+- Ultralytics YOLO (PyTorch) for local inference
+- OpenCV + NumPy for image handling
+- PyMuPDF (`pymupdf`) for PDF rendering
+- Requests for optional Roboflow Hosted Inference
 
 ---
 
@@ -11,131 +20,70 @@ structured detections together with annotated previews.
 ```
 backend/
 ├─ app/
-│  ├─ main.py          ← FastAPI application entrypoint
-│  ├─ inference.py     ← YOLO model loading and inference helpers
-│  ├─ pdf_utils.py     ← PDF → image conversion utilities
-│  └─ preprocess.py    ← Reserved for additional pre-processing
-├─ requirements.txt    ← Python dependencies
-├─ Dockerfile          ← Production image definition
-└─ README.md           ← This file
+│  ├─ main.py        ← FastAPI app, endpoints and orchestration
+│  ├─ inference.py   ← YOLO / Roboflow inference logic + drawing utils
+│  ├─ pdf_utils.py   ← PDF → image conversion (PyMuPDF)
+│  └─ preprocess.py  ← (reserved for preprocessing helpers)
+├─ requirements.txt
+├─ Dockerfile
+├─ .env.example
+└─ .python-version   ← 3.10
+
+repo-root/
+├─ best.pt           ← stamp detector (required)
+├─ best_qr.pt        ← QR detector (optional)
+├─ sign-auth.pt      ← signatures/auth/signauth detector (preferred)
+└─ best_sign.pt      ← signatures/auth fallback if `sign-auth.pt` absent
 ```
+
+Notes:
+- Model weights are expected in the repository root by default. You can override paths via environment variables.
+- The service writes annotation JSONs into `selected_output/` (configurable).
 
 ---
 
-## Prerequisites
+## Endpoints
 
-- **Python 3.11+**
-- **pip** (or uv / poetry if you prefer)
-- **Windows / WSL / Linux / macOS** – the service is OS-agnostic
-- Optional but recommended: a GPU with CUDA support for faster YOLO inference
+- `GET /health`
+  - Returns `{ "status": "ok" }`.
 
-Model checkpoints must exist in the repository root:
+- `POST /api/analyze`
+  - Request: `multipart/form-data` with one or more files under field `files`.
+  - Response: per-file pages with objects only (no previews).
+  - Side effects: writes/updates `selected_output/selected_annotations.json`, `selected_output/masked_annotations.json`, and batch variants.
 
-| File           | Purpose        | Default env variable                |
-| -------------- | -------------- | ----------------------------------- |
-| `best.pt`      | Stamp detector | `STAMP_MODEL_PATH`                  |
-| `best_qr.pt`   | QR detector    | `QR_MODEL_PATH` (optional)          |
-| `best_sign.pt` | Signature det. | `SIGNATURE_MODEL_PATH` (optional)   |
+- `POST /api/analyze/annotated`
+  - Same as `/api/analyze`, but every page also includes `image_base64` of the annotated preview.
 
-If a file is missing you will need to supply the absolute path via the
-corresponding environment variable before launching the API.
-
----
-
-## Installation
+### Request Example (PowerShell)
 
 ```powershell
-cd D:\ARMETA\backend
-
-# 1. Create and activate a virtual environment
-python -m venv .venv
-.venv\Scripts\activate          # PowerShell
-# source .venv/bin/activate     # bash / WSL
-
-# 2. Install dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
+curl -X POST http://localhost:8000/api/analyze \ 
+  -F "files=@d:/ARMETA/images/val/Frame_108.jpg" \ 
+  -F "files=@d:/ARMETA/images/val/Frame_160.jpg"
 ```
 
-If you plan to run the service inside Docker:
-
-```powershell
-docker build -t digital-inspector-backend .
-```
-
----
-
-## Configuration
-
-Environment variables (place them in `.env` or export before running):
-
-| Variable               | Description | Default |
-| ---------------------- | ----------- | ------- |
-| `STAMP_MODEL_PATH`     | Absolute/relative path to `best.pt` | `<repo_root>/best.pt` |
-| `QR_MODEL_PATH`        | Path to `best_qr.pt` (optional)     | `<repo_root>/best_qr.pt` |
-| `SIGNATURE_MODEL_PATH` | Path to `best_sign.pt` (optional)   | `<repo_root>/best_sign.pt` |
-| `CORS_ORIGINS`         | Comma-separated allowed origins     | `http://localhost:5173` |
-
-Multiple values for `CORS_ORIGINS` should be separated with commas, e.g.
-`http://localhost:5173,https://armeta.io`.
-
----
-
-## Running the API
-
-### Development (auto reload)
-
-```powershell
-cd D:\ARMETA\backend
-.venv\Scripts\activate
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### Production (example)
-
-```powershell
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
-# or docker run -p 8000:8000 digital-inspector-backend
-```
-
-The service will preload all configured YOLO models at startup. If a model file
-is missing, startup will fail with a clear error message.
-
----
-
-## API Endpoints
-
-| Method | Path                    | Description |
-| ------ | ----------------------- | ----------- |
-| GET    | `/health`               | Liveness probe, returns `{"status":"ok"}` |
-| POST   | `/api/analyze`          | Accepts one or more documents and returns detections per page (without annotated images). |
-| POST   | `/api/analyze/annotated`| Same as above but includes base64 annotated previews. Pages are processed in parallel and previews are JPEG-compressed to reduce payload size. |
-
-### Example request (PowerShell)
-
-```powershell
-Invoke-WebRequest `
-  -Uri http://localhost:8000/api/analyze/annotated `
-  -Method POST `
-  -Form @{ files = Get-Item "sample.pdf" }
-```
-
-Response structure:
+### Response Shape
 
 ```json
 {
   "files": [
     {
-      "file_name": "sample.pdf",
+      "file_name": "Frame_108.jpg",
       "pages": [
         {
           "page_index": 0,
-          "width": 2480,
-          "height": 3508,
+          "width": 1920,
+          "height": 1080,
           "objects": [
-            { "class": "stamp", "confidence": 0.93, "bbox": [120, 450, 380, 380] }
-          ],
-          "image_base64": "..." // only for /api/analyze/annotated
+            { "class": "stamp", "confidence": 0.94, "bbox": [x, y, w, h] },
+            { "class": "signature", "confidence": 0.88, "bbox": [x, y, w, h] },
+            { "class": "auth", "confidence": 0.77, "bbox": [x, y, w, h] },
+            { "class": "signauth", "confidence": 0.65, "bbox": [x, y, w, h] },
+            { "class": "qr", "confidence": 0.92, "bbox": [x, y, w, h] }
+          ]
+          // For /api/analyze/annotated only:
+          // "image_base64": "data:image/jpeg;base64,/9j/..."
         }
       ]
     }
@@ -145,33 +93,151 @@ Response structure:
 
 ---
 
-## Performance Notes
+## Exports (Server-Side)
 
-- PDFs are rasterized at **200 DPI** for faster turnaround (configurable in
-  `app/main.py` if you need higher fidelity).
-- Pages are processed concurrently through `ThreadPoolExecutor`, allowing many
-  pages/files to be analyzed without blocking the entire event loop.
-- Annotated previews are resized (max 1600px) and saved as JPEG (quality 75) to
-  minimize the payload returned to the frontend.
-- Frontend uploads are automatically batched (10 files at a time) so sending
-  dozens of documents will not crash the browser.
+The backend maintains easy-to-consume JSONs in `selected_output/`:
 
-For heavy workloads consider running the service with a GPU-enabled build of
-PyTorch/Ultralytics to leverage CUDA.
+- `selected_annotations.json` — per-file raw classes (`stamp`, `signature`, `qr`, `auth`, `signauth`).
+- `masked_annotations.json` — same data with classes mapped to canonical labels:
+  - `stamp → label_1`, `signature → label_2`, `qr → label_3`, `auth → label_4`, `signauth → label_5`.
+- Batch files (rewritten on each request with files):
+  - `selected_annotations_batch.json`
+  - `masked_annotations_batch.json`
+
+---
+
+## Installation
+
+### Prerequisites
+
+- Python `3.10` (see `.python-version`)
+- Recommended: a virtual environment
+
+### Setup (Windows PowerShell)
+
+```powershell
+cd d:\ARMETA\backend
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+### Environment Configuration
+
+Create `.env` in `backend/` (or use system env vars). Common options:
+
+```env
+# CORS for your frontend(s)
+# Comma-separated list of allowed origins
+CORS_ORIGINS=http://localhost:5173,http://localhost:5174
+# Optional regex for wildcard origins (used together with CORS_ORIGINS)
+CORS_ORIGIN_REGEX=https://.*\.vercel\.app
+
+# Confidence threshold for detections (default: 0.25)
+DETECT_CONF=0.25
+
+# Optional custom output directory for annotation JSONs
+ANNOTATIONS_OUTPUT_DIR=selected_output
+
+# Explicit model weights (otherwise defaults to repo-root files below)
+STAMP_MODEL_PATH=d:/ARMETA/best.pt
+QR_MODEL_PATH=d:/ARMETA/best_qr.pt
+SIGNATURE_MODEL_PATH=d:/ARMETA/sign-auth.pt
+
+# Roboflow Hosted Inference (optional; overrides local signature YOLO)
+ROBOFLOW_MODEL_ID=signature-krkm0/1
+ROBOFLOW_API_KEY=your_api_key_here
+# Optional custom endpoint (if not provided, built from model id)
+SIGNATURE_ROBOFLOW_ENDPOINT=https://detect.roboflow.com/signature-krkm0/1?api_key=your_api_key_here&format=json
+# Optional tuning
+ROBOFLOW_CONF=0.25
+ROBOFLOW_OVERLAP=30
+ROBOFLOW_FORMAT=json
+```
+
+Notes:
+- If `SIGNATURE_MODEL_PATH` is not set, the service uses `sign-auth.pt` if present, otherwise `best_sign.pt`.
+- If both `ROBOFLOW_MODEL_ID` and `ROBOFLOW_API_KEY` are set, signature detection uses Roboflow instead of local YOLO.
+- Legacy `MODEL_PATH` from older configs is ignored by the current code; use `STAMP_MODEL_PATH`, `QR_MODEL_PATH`, and `SIGNATURE_MODEL_PATH` instead.
+- `CORS_ORIGIN_REGEX` can be combined with `CORS_ORIGINS` to allow wildcard domains; by default the backend allows `https://.*\.vercel\.app`.
+
+### Run (development)
+
+```powershell
+uvicorn app.main:app --reload --port 8000
+# Open http://localhost:8000/docs for interactive Swagger UI
+```
+
+---
+
+## Docker
+
+Build the image (context is `backend/`):
+
+```powershell
+cd d:\ARMETA\backend
+docker build -t digital-inspector-backend .
+```
+
+Run with volume mounts for weights and output directory:
+
+```powershell
+docker run --rm -p 8000:8000 ^
+  -e CORS_ORIGINS=http://localhost:5173 ^
+  -v ${PWD}\..\best.pt:/app/best.pt ^
+  -v ${PWD}\..\best_qr.pt:/app/best_qr.pt ^
+  -v ${PWD}\..\sign-auth.pt:/app/sign-auth.pt ^
+  -v ${PWD}\..\selected_output:/app/selected_output ^
+  digital-inspector-backend
+```
+
+Notes:
+- The Dockerfile copies only `app/` and `requirements.txt`. Mount weights from the repo root or bake them in a custom image.
+
+---
+
+## How It Works
+
+- PDF handling: `pdf_utils.py` uses PyMuPDF to render pages into JPEG/PNG and passes them to inference.
+- Inference:
+  - Local YOLO via Ultralytics for `stamp`, `qr`, `signature`, `auth`, `signauth` classes.
+  - Optional Roboflow endpoint for signature detection.
+- `/api/analyze` renders PDFs at ~300 DPI; `/api/analyze/annotated` uses ~200 DPI and creates compressed annotated previews (`image_base64`).
+- Confidence threshold is controlled by `DETECT_CONF`.
+- Exports are accumulated and masked into `selected_output/` JSON files.
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Fix |
-| ------- | --- |
-| `ModuleNotFoundError: fastapi` | Re-run `pip install -r requirements.txt` inside the virtual environment. |
-| `FileNotFoundError: best.pt`   | Check that the model files exist in `D:\ARMETA\` or update the `*_MODEL_PATH` env vars. |
-| PDFs take too long to render | Lower the DPI in `pdf_utils.pdf_bytes_to_images` or upgrade hardware. |
-| Large responses | Use `/api/analyze` (without annotated images) or decrease `max_dimension`/`quality` values in `_encode_image_to_base64`. |
+- CORS blocked by browser
+  - Set `CORS_ORIGINS` to include your frontend origin(s) and restart the server.
+
+- PDFs fail to process with "PyMuPDF not installed"
+  - Ensure `pymupdf` is installed (`requirements.txt` already includes it).
+
+- GPU not used / slow inference
+  - Ultralytics/PyTorch will use CPU unless a compatible CUDA build is installed. Install the appropriate `torch` wheel for your GPU, or keep CPU and tune `DETECT_CONF`/DPI.
+
+- Roboflow request timeouts
+  - Check connectivity and your `ROBOFLOW_*` settings. Consider using local YOLO by omitting Roboflow vars.
+
+- `FileNotFoundError` for model weights
+  - Provide paths via env vars or place files in the repo root (`best.pt`, `best_qr.pt`, `sign-auth.pt` or `best_sign.pt`).
+
+- Large inputs or memory errors
+  - Reduce PDF DPI (code-level tweak) or limit page count upstream. Annotated mode already uses a lower DPI.
+
+---
+
+## Security & Notes
+
+- This demo API accepts file uploads and runs heavy processing; do not expose it publicly without rate limits and appropriate hardening.
+- Inputs are not stored by default; only aggregated annotations are written to `selected_output/`.
+- The API surface is minimal to support the frontend use-case.
 
 ---
 
 ## License
 
-Internal ARMETA project – see the root repository for licensing information.
+Internal ARMETA project — see the root repository for licensing information.
